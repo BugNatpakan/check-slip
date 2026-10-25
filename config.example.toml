@@ -1,0 +1,40 @@
+# Slip checker settings.
+# Copy this file to config.toml and fill it in. config.toml is git-ignored,
+# so your account details stay on your machine.
+
+# Fee per participant in THB. 0 = not set (Summary will remind you).
+fee = 0
+
+# Random spot-check sample of clean slips.
+# The sample is at least `sample_size` people, and grows to `sample_fraction`
+# of clean slips once that is bigger. Already-sampled people are always kept.
+sample_size = 40
+sample_fraction = 0.12
+seed = 2026
+
+# DUPLICATE_IMAGE: byte-identical files are always flagged. Images whose perceptual
+# hashes differ by this many bits or fewer are flagged only when at least one of
+# them has no valid slip QR (slips from the same bank app all look alike).
+phash_max_distance = 4
+
+
+# ---------------------------------------------------------------------------
+# Online check with Slip2Go (paid). Only the QR text of each slip is sent,
+# each slip once. Results are cached in .cache/slip2go.json.
+# The secret key goes in slip2go_secret.txt (NOT in this file).
+[slip2go]
+enabled = false              # true = check new slips with Slip2Go on every run
+api_base_url = "https://connect.slip2go.com"   # host only (a pasted endpoint URL also works)
+check_receiver = true        # money must go to the account below
+check_amount = true          # per participant: sum of their slips must equal `fee`
+check_date = false           # transfer must be on/after paid_after
+paid_after = ""              # "YYYY-MM-DD"
+max_calls_per_run = 2        # 0 = no cap; keep 2 for a first test
+confirm_before_sending = true   # ask "Send N slips? [y/N]" before calling
+
+[slip2go.receiver]           # the account the fee must be paid into
+bank_code = ""               # e.g. "006" = KTB, "004" = KBANK, "014" = SCB, "002" = BBL
+account_number = ""          # digits only, e.g. "1234567890"
+account_name_th = ""         # Thai account name as shown in your bank app, no title
+account_name_en = ""         # English account name, no title. Some banks (e.g. Krungsri)
+                             # return only a cut-short English name, so fill this in too.

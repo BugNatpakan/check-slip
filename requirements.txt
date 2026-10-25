@@ -1,0 +1,9 @@
+zxing-cpp>=2.2
+opencv-python-headless>=4.8
+PyMuPDF>=1.23
+ImageHash>=4.3
+Pillow>=10.0
+numpy>=1.24
+openpyxl>=3.1
+tqdm>=4.66
+tomli>=2.0; python_version < "3.11"

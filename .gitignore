@@ -1,0 +1,23 @@
+# Participants' financial data: never commit
+inbox/
+output/
+.cache/
+*.zip
+*.xlsx
+*.csv
+
+# Your settings (account number/name) and Slip2Go secret key.
+# config.example.toml is the committed template.
+config.toml
+slip2go_secret.txt
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Editors / OS
+.vscode/
+~$*
+.DS_Store
+Thumbs.db
