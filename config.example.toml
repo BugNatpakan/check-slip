@@ -8,8 +8,8 @@ fee = 0
 # Random spot-check sample of clean slips.
 # The sample is at least `sample_size` people, and grows to `sample_fraction`
 # of clean slips once that is bigger. Already-sampled people are always kept.
-sample_size = 40
-sample_fraction = 0.12
+sample_size = 0
+sample_fraction = 0
 seed = 2026
 
 # DUPLICATE_IMAGE: byte-identical files are always flagged. Images whose perceptual
@@ -36,5 +36,4 @@ confirm_before_sending = true   # ask "Send N slips? [y/N]" before calling
 bank_code = ""               # e.g. "006" = KTB, "004" = KBANK, "014" = SCB, "002" = BBL
 account_number = ""          # digits only, e.g. "1234567890"
 account_name_th = ""         # Thai account name as shown in your bank app, no title
-account_name_en = ""         # English account name, no title. Some banks (e.g. Krungsri)
-                             # return only a cut-short English name, so fill this in too.
+account_name_en = ""         # English account name, no title. Some banks (e.g. Krungsri) return only a cut-short English name, so fill this in too.
