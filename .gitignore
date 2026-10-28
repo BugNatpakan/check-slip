@@ -10,6 +10,8 @@ output/
 # config.example.toml is the committed template.
 config.toml
 slip2go_secret.txt
+backoffice_session.txt
+*.part
 
 # Python
 .venv/

@@ -4,17 +4,25 @@
 Offline by default. If [slip2go] enabled = true in config.toml, new slips are also
 checked online with Slip2Go (only the QR text is sent, each slip once).
 
+If [backoffice] auto_download = true, the latest zip is first downloaded from the
+backoffice into inbox/ (asks for a fresh bo_session cookie when the session expired).
+
 Run with no arguments to process the latest zip in inbox/:
     python check_slips.py
 Options:
-    --zip PATH        use a specific zip instead of the latest one
+    --zip PATH        use a specific zip instead of the latest one (no download)
+    --no-download     don't download; use the newest zip already in inbox/
     --redecode        ignore the decode cache and decode every file again
 """
 from __future__ import annotations
 
 import argparse
+import base64
+import collections
 import csv
 import datetime as dt
+import getpass
+import glob
 import hashlib
 import io
 import json
@@ -27,6 +35,7 @@ import sys
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -64,12 +73,15 @@ STATE_FILE = CACHE / "state.json"
 DECODE_CACHE_FILE = CACHE / "decode_cache.json"
 API_CACHE_FILE = CACHE / "slip2go.json"
 SECRET_FILE = BASE / "slip2go_secret.txt"
+SESSION_FILE = BASE / "backoffice_session.txt"
 XLSX = OUTPUT / "slip_check.xlsx"
 CSV_OUT = OUTPUT / "slip_check.csv"
 
 DECODER_VERSION = 2
-ZIP_DATE_RE = re.compile(r"payment-slips-(\d{4}-\d{2}-\d{2})\.zip$", re.I)
+ZIP_DATE_RE = re.compile(r"payment-slips-(\d{4}-\d{2}-\d{2})(?: ?\(\d+\))?\.zip$", re.I)  # browsers add " (1)"
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+# fileStatus values that mean the participant has a slip on the website (PASSED = admin accepted it)
+HAS_SLIP_STATUSES = {"UPLOADED", "PASSED", "CHANGE_REQUIRED"}
 PDF_DPI = 200
 PDF_MAX_PAGES = 5
 THAI_TZ = dt.timezone(dt.timedelta(hours=7))
@@ -607,6 +619,150 @@ def zip_date(path: Path) -> dt.date:
     return dt.date.fromtimestamp(path.stat().st_mtime)
 
 
+def has_slip_status(row: dict) -> bool:
+    """True if the website says this participant has a slip (any status but EMPTY)."""
+    return (row.get("fileStatus", "").upper() in HAS_SLIP_STATUSES
+            or str(row.get("hasFile", "")).strip().lower() == "true")
+
+
+def _jwt_expiry(token: str) -> dt.datetime | None:
+    """Read `exp` from a JWT payload (no signature check: we only want to know when it runs out)."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload))["exp"]
+        return dt.datetime.fromtimestamp(int(exp), THAI_TZ)
+    except (IndexError, KeyError, ValueError, TypeError):
+        return None
+
+
+_JWT_RE = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+")
+
+
+def _extract_jwt(text: str) -> str:
+    """Find the JWT in whatever was pasted: the bare value, 'bo_session=...', a cookie header,
+    or a whole DevTools cookie row with domain/path/expiry columns around it."""
+    m = _JWT_RE.search(text or "")
+    return m.group(0) if m else ""
+
+
+def _read_session() -> str:
+    try:
+        return _extract_jwt(SESSION_FILE.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return ""
+
+
+def _session_ok(token: str) -> bool:
+    exp = _jwt_expiry(token)
+    return exp is not None and exp > dt.datetime.now(THAI_TZ) + dt.timedelta(minutes=2)
+
+
+def _ask_session() -> str:
+    """Ask for a fresh bo_session cookie (hidden input) and store it. Empty = skip."""
+    if not sys.stdin.isatty():
+        return ""
+    print("Backoffice session is missing or expired.")
+    print("  Log in to the backoffice in Chrome → F12 → Application → Cookies → copy the bo_session value.")
+    try:
+        print("  Typing is hidden: nothing shows while you paste. If Ctrl+V doesn't work, right-click to paste.")
+        token = getpass.getpass("  Paste bo_session, then Enter (Enter alone = skip download): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+    if not token:
+        return ""
+    token = _extract_jwt(token)
+    if not token:
+        print("  That doesn't look like a bo_session value (it should start with 'eyJ'). Skipping download.")
+        return ""
+    if not _session_ok(token):
+        print("  That cookie is already expired. Skipping download.")
+        return ""
+    SESSION_FILE.write_text(token + "\n", encoding="utf-8")
+    exp = _jwt_expiry(token)
+    if exp:
+        print(f"  Saved. Session valid until {exp:%Y-%m-%d %H:%M}.")
+    return token
+
+
+def _filename_from_headers(headers) -> str:
+    cd = headers.get("Content-Disposition", "") or ""
+    m = re.search(r"filename\*=UTF-8''([^;]+)", cd, re.I) or re.search(r'filename="?([^";]+)"?', cd, re.I)
+    name = Path(urllib.parse.unquote(m.group(1)) if m else "").name
+    if not name.lower().endswith(".zip"):
+        name = f"payment-slips-{dt.date.today().isoformat()}.zip"
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+
+
+def download_latest_zip(bcfg: dict) -> Path | None:
+    """Download the payment zip from the backoffice into inbox/. Never fatal: returns None on any problem."""
+    url = str(bcfg.get("export_url", "")).strip()
+    if not url:
+        print("Download skipped: set [backoffice] export_url in config.toml.")
+        return None
+    token = _read_session()
+    if not _session_ok(token):
+        token = _ask_session()
+        if not token:
+            print("Download skipped: no valid backoffice session. Using the newest zip already in inbox/.")
+            return None
+    headers = {"Cookie": f"bo_session={token}", "Accept": "application/zip,application/octet-stream,*/*",
+               "User-Agent": "Mozilla/5.0 (slip_check)"}
+    if bcfg.get("referer"):
+        headers["Referer"] = str(bcfg["referer"])
+    req = urllib.request.Request(url, headers=headers)
+    part = INBOX / "download.part"
+    try:
+        with urllib.request.urlopen(req, timeout=300) as r:
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if "html" in ctype or "json" in ctype:  # a login page or an error object, not the zip
+                raise PermissionError(f"HTTP {r.status}, got {ctype.split(';')[0] or 'unknown type'} instead of a zip")
+            name = _filename_from_headers(r.headers)
+            total = int(r.headers.get("Content-Length") or 0) or None
+            with open(part, "wb") as out, tqdm(total=total, unit="B", unit_scale=True, desc="Downloading zip") as bar:
+                for chunk in iter(lambda: r.read(1 << 16), b""):
+                    out.write(chunk)
+                    bar.update(len(chunk))
+    except (urllib.error.HTTPError, PermissionError) as e:
+        part.unlink(missing_ok=True)
+        if isinstance(e, PermissionError) or e.code in (401, 403):
+            SESSION_FILE.unlink(missing_ok=True)
+            what = str(e) if isinstance(e, PermissionError) else f"HTTP {e.code}"
+            print(f"Download failed ({what}): backoffice session expired or request blocked. "
+                  "You'll be asked for a new cookie next run.")
+        else:
+            print(f"Download failed: backoffice returned HTTP {e.code}. Using the newest zip already in inbox/.")
+        return None
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        part.unlink(missing_ok=True)
+        print(f"Download failed ({type(e).__name__}). Using the newest zip already in inbox/.")
+        return None
+    try:
+        with zipfile.ZipFile(part) as zf:
+            if not any(n.rsplit("/", 1)[-1].lower() == "index.csv" for n in zf.namelist()):
+                raise zipfile.BadZipFile
+    except zipfile.BadZipFile:
+        part.unlink(missing_ok=True)
+        print("Download failed: the backoffice did not send a valid payment zip. Using the newest zip already in inbox/.")
+        return None
+
+    # Never overwrite a zip: identical content = nothing new; different = "name (N).zip"
+    new_sha = sha256_file(part)
+    stem = name[:-4]
+    for existing in sorted(INBOX.glob(f"{glob.escape(stem)}*.zip")):
+        if re.fullmatch(re.escape(stem) + r"(?: \(\d+\))?\.zip", existing.name) and sha256_file(existing) == new_sha:
+            part.unlink()
+            print(f"Downloaded zip is the same as {existing.name}: no change since the last download.")
+            return existing
+    target, n = INBOX / name, 1
+    while target.exists():
+        target, n = INBOX / f"{stem} ({n}).zip", n + 1
+    os.replace(part, target)
+    print(f"Downloaded {target.name} ({target.stat().st_size / 1e6:.1f} MB).")
+    return target
+
+
 def pick_latest_zip() -> Path:
     zips = [p for p in INBOX.glob("*.zip") if p.is_file()]
     if not zips:
@@ -905,8 +1061,11 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser(description="Pre-screen LG26 payment slips.")
-    ap.add_argument("--zip", type=Path, help="zip to process (default: latest in inbox/)")
+    ap.add_argument("--zip", type=Path, help="zip to process (default: latest in inbox/); skips the download")
+    ap.add_argument("--no-download", action="store_true", help="don't download from the backoffice this run")
     ap.add_argument("--redecode", action="store_true", help="ignore the decode cache")
+    ap.add_argument("--allow-shrink", action="store_true",
+                    help="process a zip even if its index.csv has far fewer people than last run")
     args = ap.parse_args()
 
     for d in (INBOX, OUTPUT, HISTORY, CACHE, EXTRACTED):
@@ -922,8 +1081,13 @@ def main() -> int:
     scfg = cfg.get("slip2go", {}) or {}
     rcfg = scfg.get("receiver", {}) or {}
     online = bool(scfg.get("enabled"))
+    bcfg = cfg.get("backoffice", {}) or {}
 
-    zpath = args.zip.resolve() if args.zip else pick_latest_zip()
+    downloaded = None
+    if not args.zip and not args.no_download and bcfg.get("auto_download"):
+        downloaded = download_latest_zip(bcfg)
+    # the downloaded zip is what the backoffice has now, even if an older copy of it was already here
+    zpath = args.zip.resolve() if args.zip else (downloaded or pick_latest_zip())
     if not zpath.is_file():
         sys.exit(f"Zip not found: {zpath}")
     zdate = zip_date(zpath)
@@ -939,6 +1103,13 @@ def main() -> int:
 
     _, members = extract_zip(zpath)
     rows = read_index(members)
+    # A filtered export (e.g. only slips still waiting for review) would mark everyone else
+    # "removed from index.csv". Stop before touching any output.
+    prev_in_index = sum(p.get("in_index", True) for p in prev_parts.values())
+    if prev_in_index >= 10 and len(rows) < prev_in_index // 2 and not args.allow_shrink:
+        sys.exit(f"{zpath.name} lists only {len(rows)} participants, but the previous run had {prev_in_index}.\n"
+                 "It looks like a filtered export. Nothing was changed.\n"
+                 "Check [backoffice] export_url (no paymentSlip filter), or run with --allow-shrink if this is intended.")
     matched, unmatched_files = match_files(rows, members)
 
     # ---- decode (cached by file content hash)
@@ -972,7 +1143,7 @@ def main() -> int:
     for row in rows:
         lg = row["lgNumber"]
         prev = prev_parts.get(lg, {})
-        uploaded = row.get("fileStatus", "").upper() == "UPLOADED"
+        uploaded = has_slip_status(row)
         m = matched.get(lg)
         e = decoded.get(lg)
         rec = {
@@ -980,7 +1151,7 @@ def main() -> int:
             "fileStatus": row.get("fileStatus", ""), "file": m[0].rsplit("/", 1)[-1] if m else "",
             "first_seen": prev.get("first_seen", ""), "_path": m[1] if m else None, "sha": shas.get(lg),
             "phash": e.get("phash") if e else None, "slips": [], "flag_list": [], "not_paid": False,
-            "api_ok": False,
+            "api_ok": False, "_uploaded": uploaded,
         }
         for s in (e or {}).get("slips", []):
             rec["slips"].append({**s, **parse_slip(s["payload"])})
@@ -1169,6 +1340,8 @@ def main() -> int:
     if need > len(picks):
         picks += rng.sample(old_pool, min(need - len(picks), len(old_pool)))
     sample = kept | set(picks)
+    if sample_size <= 0 and sample_fraction <= 0:
+        sample = set()  # sampling turned off: also drop people picked in earlier runs
     for lg, rec in recs.items():
         rec["in_sample"] = "yes" if lg in sample else ""
     new_pool_state = sorted(pool_prev | set(key.values()))
@@ -1227,7 +1400,8 @@ def main() -> int:
 
     # ---- summary
     n_total = len(records)
-    n_uploaded = sum(r["fileStatus"].upper() == "UPLOADED" for r in records)
+    n_uploaded = sum(r["_uploaded"] for r in records)
+    by_status = sorted(collections.Counter(r["fileStatus"] or "(blank)" for r in records).items())
     n_files = sum(bool(r["sha"]) for r in records)
     n_valid_people = sum(any(s["crc_ok"] for s in r["slips"]) for r in records)
     n_slips = sum(len(r["slips"]) for r in records)
@@ -1264,8 +1438,9 @@ def main() -> int:
         ("zip used", zpath.name), ("zip date", zdate.isoformat()), ("run time", run_time.strftime("%Y-%m-%d %H:%M:%S")),
         ("Slip2Go", "enabled" if online else "off (offline run)"),
         (None, None), ("PARTICIPANTS", None),
-        ("total participants", n_total), ("uploaded (fileStatus UPLOADED)", n_uploaded),
+        ("total participants", n_total), ("uploaded (UPLOADED / PASSED / CHANGE_REQUIRED)", n_uploaded),
         ("not uploaded (NOT_PAID)", n_not_paid), ("slip files found", n_files),
+        *[(f"fileStatus: {s}", c) for s, c in by_status],
         ("files in zip not matched to index.csv", len(unmatched_files)),
         (None, None), ("SLIPS", None),
         ("participants with a valid slip QR", n_valid_people),

@@ -37,3 +37,12 @@ bank_code = ""               # e.g. "006" = KTB, "004" = KBANK, "014" = SCB, "00
 account_number = ""          # digits only, e.g. "1234567890"
 account_name_th = ""         # Thai account name as shown in your bank app, no title
 account_name_en = ""         # English account name, no title. Some banks (e.g. Krungsri) return only a cut-short English name, so fill this in too.
+
+
+# ---------------------------------------------------------------------------
+# Download the latest payment zip from the backoffice before each run.
+# The login cookie goes in backoffice_session.txt (asked for when it expires).
+[backoffice]
+auto_download = false        # true = download into inbox/ before each run
+export_url = ""              # the backoffice "export payment zip" URL (copy it from your browser's DevTools)
+referer = ""                 # optional: the backoffice site address you log in to

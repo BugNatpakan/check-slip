@@ -67,12 +67,32 @@ Open `config.toml` and set `fee` (camp fee in THB, e.g. `fee = 1500`).
 
 **Never share `slip2go_secret.txt`.** / **ห้ามแชร์ไฟล์ `slip2go_secret.txt`**
 
+### 1c. Automatic download from the backoffice (optional) / ดาวน์โหลด zip อัตโนมัติ (ถ้าใช้)
+
+1. In `config.toml` under `[backoffice]`, set `auto_download = true` and paste the backoffice
+   "export payment zip" URL into `export_url`. To find it: in Chrome open DevTools (F12) → **Network**,
+   click the export button in the backoffice, click the request, copy its **Request URL**.
+   ใน `config.toml` ส่วน `[backoffice]` ตั้ง `auto_download = true` และใส่ URL ปุ่ม export zip
+   (หาได้จาก F12 → Network → กดปุ่ม export → คัดลอก Request URL)
+2. The first run asks for your login cookie. Log in to the backoffice in Chrome → F12 →
+   **Application** → **Cookies** → copy the value of **`bo_session`** and paste it (input is hidden).
+   It is saved in `backoffice_session.txt`. A login lasts only a few hours; when it runs out the
+   tool simply asks again.
+   ครั้งแรกโปรแกรมจะขอ cookie: ล็อกอิน backoffice → F12 → Application → Cookies → คัดลอกค่า
+   `bo_session` มาวาง (ไม่แสดงบนจอ) cookie หมดอายุภายในไม่กี่ชั่วโมง หมดแล้วโปรแกรมจะถามใหม่
+
+**Never share `backoffice_session.txt`: it logs in to the backoffice as you.**
+**ห้ามแชร์ `backoffice_session.txt` เพราะใช้ล็อกอิน backoffice แทนเราได้**
+
 ---
 
 ## 2. Every time new slips come in / ทุกครั้งที่โหลดข้อมูลใหม่
 
-1. Download the zip from the website into `inbox/`, keep the name `payment-slips-YYYY-MM-DD.zip`.
-   ดาวน์โหลด zip จากเว็บ วางใน `inbox/`
+1. **With auto download:** skip this step, the run downloads the zip itself (paste a new
+   `bo_session` cookie if it asks). **Without:** download the zip from the website into `inbox/`,
+   keep the name `payment-slips-YYYY-MM-DD.zip`.
+   **ถ้าเปิดดาวน์โหลดอัตโนมัติ** ข้ามขั้นนี้ได้ (ถ้าถาม cookie ให้วางใหม่)
+   **ถ้าไม่เปิด** ดาวน์โหลด zip จากเว็บ วางใน `inbox/`
 2. **Close `slip_check.xlsx` in Excel.** / **ปิดไฟล์ Excel ก่อน**
 3. Run / รัน:
    - Windows: `.venv\Scripts\Activate.ps1` then `python check_slips.py`
@@ -97,8 +117,11 @@ Open `config.toml` and set `fee` (camp fee in THB, e.g. `fee = 1500`).
    The difference is calculated for you.
    สุดท้าย ใส่ยอดในสมุดบัญชีที่ Summary แล้วดูผลต่าง
 
-It always uses the newest zip in `inbox/` (by the date in the filename).
-To pick one: `python check_slips.py --zip inbox/payment-slips-2026-10-25.zip`
+It uses the zip it just downloaded, otherwise the newest zip in `inbox/` (by the date in the filename).
+A download with the same content as a zip already in `inbox/` is not saved twice; a changed one is
+saved as `payment-slips-DATE (1).zip`. Old zips are never overwritten.
+- Skip the download once: `python check_slips.py --no-download`
+- Use a specific zip: `python check_slips.py --zip inbox/payment-slips-2026-10-25.zip`
 
 Your manual columns and the passbook cell are kept on every run. The previous Excel file
 is copied to `output/history/` first.
@@ -166,6 +189,11 @@ green = you marked ✅ Verified · grey = not paid.
 Clean slips get a random spot-check sample (`in_sample = yes`): at least `sample_size` people,
 growing to `sample_fraction` of clean slips. People already sampled stay sampled.
 
+To turn it off (for example when Slip2Go already verifies every slip), set `sample_size = 0` and
+`sample_fraction = 0`. Then nobody is sampled, including people picked in earlier runs, and
+"To check" only lists flagged rows.
+ปิดการสุ่มตรวจ: ตั้ง `sample_size = 0` และ `sample_fraction = 0` ชีต To check จะเหลือเฉพาะแถวที่มี flag
+
 ## 7. Files / ไฟล์
 
 - `inbox/`: zips you download (never modified)
@@ -174,6 +202,7 @@ growing to `sample_fraction` of clean slips. People already sampled stay sampled
 - `.cache/`: extracted files, decode cache, Slip2Go results and run state. **Don't delete it.**
   ห้ามลบ `.cache/`
 - `slip2go_secret.txt`: your Slip2Go key. **Never share.**
+- `backoffice_session.txt`: your backoffice login cookie. **Never share.**
 - `config.toml`: your settings and account details (git-ignored). `config.example.toml` is the
   blank template that is committed.
 
